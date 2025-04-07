@@ -1,0 +1,7 @@
+services:
+  opcua-server:
+    build: .
+    ports:
+      - "4840:4840"
+    volumes:
+      - ./sensor_data.csv:/app/sensor_data.csv:ro
