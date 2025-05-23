@@ -4,55 +4,70 @@ from asyncua.ua import VariantType
 import pandas as pd
 from datetime import datetime
 
+async def publish_sensor(server, idx, df_sensor):
+    objects = server.get_objects_node()
+    sensor_node = await objects.get_child([f"{idx}:Sensors"])
+    ts_sensor = await sensor_node.get_child([f"{idx}:Timestamp_Sensor"])
+    sensors = {}
+    for m in df_sensor['Machine_ID'].unique():
+        obj = await sensor_node.get_child([f"{idx}:{m}"])
+        sensors[m] = {
+            'Temperature_C': await obj.get_child([f"{idx}:Temperature_C"]),
+            'Vibration_mm_s': await obj.get_child([f"{idx}:Vibration_mm_s"]),
+            'Pressure_bar': await obj.get_child([f"{idx}:Pressure_bar"]),
+        }
+
+    # Loop indefinitely over sensor data
+    timestamps = sorted(df_sensor['Timestamp'].unique())
+    while True:
+        for ts in timestamps:
+            await ts_sensor.write_value(ts.to_pydatetime(), VariantType.DateTime)
+            batch = df_sensor[df_sensor['Timestamp'] == ts]
+            for _, row in batch.iterrows():
+                m = row['Machine_ID']
+                await sensors[m]['Temperature_C'].write_value(float(row['Temperature_C']))
+                await sensors[m]['Vibration_mm_s'].write_value(float(row['Vibration_mm_s']))
+                await sensors[m]['Pressure_bar'].write_value(float(row['Pressure_bar']))
+            print(f"{datetime.now().isoformat()} – Sensor published {len(batch)} records @ {ts}")
+            await asyncio.sleep(2)
 
 async def main():
-    try:
-        # Load CSV data and exclude timestamp column
-        df = pd.read_csv('sensor_data.csv')
-        sensor_columns = df.columns.tolist()[1:]  # Skip first column (Timestamp)
+    # Load sensor CSV
+    df_sensor = pd.read_csv('sensor_data.csv', parse_dates=['Timestamp'])
+    df_sensor['Machine_ID'] = df_sensor['Machine_ID'].astype(str)
 
-        # Initialize OPC UA server
-        server = Server()
-        await server.init()
-        server.set_endpoint("opc.tcp://0.0.0.0:4840/freeopcua/server/")
+    # OPC UA server setup
+    server = Server()
+    await server.init()
+    server.set_endpoint("opc.tcp://0.0.0.0:4840/freeopcua/server/")
+    idx = await server.register_namespace("iot_sensors")
+    objects = server.get_objects_node()
 
-        # Setup namespace
-        uri = "iot_sensors"
-        idx = await server.register_namespace(uri)
+    # Create root node and timestamp variable
+    sensor_node = await objects.add_object(idx, "Sensors")
+    ts_sensor = await sensor_node.add_variable(
+        idx, "Timestamp_Sensor", df_sensor['Timestamp'].iloc[0].to_pydatetime()
+    )
+    await ts_sensor.set_writable()
 
-        # Create object node
-        objects = server.get_objects_node()
-        sensor_node = await objects.add_object(idx, "Sensors")
-
-        # Create variables using sensor names from CSV headers
-        variables = {}
-        for col in sensor_columns:
-            var = await sensor_node.add_variable(idx, col, 0.0)
+    # Create machine variables
+    for m in df_sensor['Machine_ID'].unique():
+        obj = await sensor_node.add_object(idx, m)
+        for meas in ['Temperature_C', 'Vibration_mm_s', 'Pressure_bar']:
+            var = await obj.add_variable(idx, meas, 0.0)
             await var.set_writable()
-            variables[col] = var
-            print(f"Created variable: {col}")
 
-        await server.start()
-        print(f"Server started at {server.endpoint}")
+    # Start server and publishing
+    await server.start()
+    print(f"Server started at {server.endpoint}")
 
-        current_row = 0
-        total_rows = len(df)
-
-        while True:
-            row_data = df.iloc[current_row]
-            for col in sensor_columns:
-                await variables[col].write_value(row_data[col], VariantType.Double)
-
-            print(f"{datetime.now().isoformat()} - Published row {current_row + 1}/{total_rows}")
-            current_row = (current_row + 1) % total_rows
-            await asyncio.sleep(1)
-
+    try:
+        await publish_sensor(server, idx, df_sensor)
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print("Error:", e)
     finally:
         await server.stop()
         print("Server stopped")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
