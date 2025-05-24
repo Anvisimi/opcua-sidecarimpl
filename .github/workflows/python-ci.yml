@@ -31,12 +31,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # install test tools if separate file
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          else
+            pip install pytest-cov
+          fi
 
-      - name: Run tests & coverage
+      - name: Run tests & enforce coverage
         run: |
-          # --cov=.         : measure coverage on all files under cwd
-          # --cov-report=term-missing : show missing lines in output
-          # --cov-fail-under=70       : fail if total coverage < 70%
           pytest --cov=. --cov-report=term-missing --cov-fail-under=70 -v
