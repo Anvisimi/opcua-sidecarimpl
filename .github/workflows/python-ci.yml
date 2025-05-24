@@ -62,8 +62,24 @@ jobs:
         uses: snyk/actions/python@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --sarif-file-output=snyk-deps.sarif
+        continue-on-error: true
+
+      - name: Upload Snyk dependencies scan results to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-deps.sarif
 
       - name: Run Snyk Code to check for vulnerabilities in source code
-          uses: snyk/actions/code@master
-          env:
-            SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        uses: snyk/actions/code@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --sarif-file-output=snyk-code.sarif
+        continue-on-error: true
+
+      - name: Upload Snyk Code scan results to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-code.sarif
