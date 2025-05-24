@@ -1,2 +1,13 @@
-asyncua
-pandas
+# Production Dependencies for OPCUA Server (myProject)
+# Install with: pip install -r requirements.txt
+
+# OPC UA server implementation
+asyncua>=1.0.0
+
+# Data processing and CSV handling
+pandas>=1.5.0
+
+# Development / testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-mock>=3.10.0
