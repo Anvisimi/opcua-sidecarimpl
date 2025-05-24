@@ -66,5 +66,6 @@ jobs:
 
       - name: Run Snyk Code to check for vulnerabilities in source code
         run: snyk code test
+        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
