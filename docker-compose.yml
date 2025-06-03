@@ -5,3 +5,4 @@ services:
       - "4840:4840"
     volumes:
       - ./sensor_data.csv:/app/sensor_data.csv:ro
+      - ./data/M01/OP00/good/M01_Aug_2019_OP00_000.h5:/app/M01_Aug_2019_OP00_000.h5:ro
