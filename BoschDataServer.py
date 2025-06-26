@@ -43,15 +43,7 @@ async def setup_vibration_streaming(parent_node, idx):
     )
     await vibration_vars['Timestamp'].set_writable(False)
 
-    # Initial batch slice
-    init_batch = vibration_data[0:BATCH_SIZE, :]  # shape (10,3)
-    # 2D array
-    vibration_vars['VibrationBatch'] = await vib_group.add_variable(
-        idx,
-        "VibrationBatch",
-        [[float(x) for x in row] for row in init_batch]
-    )
-    await vibration_vars['VibrationBatch'].set_writable(False)
+    init_batch = vibration_data[0 : BATCH_SIZE, :]
 
     # 1D arrays per axis
     axes = ['X', 'Y', 'Z']
@@ -91,7 +83,6 @@ async def update_vibration_data():
     z1d = [float(x) for x in batch[:, 2]]
 
     # write to OPC UA
-    await vibration_vars['VibrationBatch'].write_value(batch_2d)
     await vibration_vars['VibrationXBatch'].write_value(x1d)
     await vibration_vars['VibrationYBatch'].write_value(y1d)
     await vibration_vars['VibrationZBatch'].write_value(z1d)
