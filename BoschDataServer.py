@@ -1,92 +1,110 @@
 import asyncio
-from asyncua import Server
-import h5py
 import time
+
+import h5py
+import numpy as np
+from asyncua import Server
 
 # Load HDF5 file
 h5_file_path = "M01_Aug_2019_OP00_000.h5"
 h5_file = h5py.File(h5_file_path, 'r')
 
-# Global variables for streaming
+# Global state
 current_sample_index = 0
 vibration_data = None
-vibration_vars = []
+vibration_vars = {}  # dict to hold our OPC UA variables
+
+BATCH_SIZE = 10  # number of samples per update
 
 
 async def setup_vibration_streaming(parent_node, idx):
-    """Setup OPC UA variables for streaming vibration data"""
+    """Setup OPC UA variables for streaming batched vibration data"""
     global vibration_data, vibration_vars
 
-    # Get vibration data from HDF5 file
     vibration_data = h5_file['vibration_data']
     print(f"Loaded vibration data with shape: {vibration_data.shape}")
 
-    # Create OPC UA variables for each vibration channel
-    vibration_vars = []
-
-    # Create a vibration group
     vib_group = await parent_node.add_object(idx, "VibrationStreaming")
 
-    # Add metadata variables
-    total_samples_var = await vib_group.add_variable(idx, "TotalSamples", vibration_data.shape[0])
-    await total_samples_var.set_writable(False)
+    # Metadata
+    total_samples = vibration_data.shape[0]
+    vibration_vars['TotalSamples'] = await vib_group.add_variable(
+        idx, "TotalSamples", total_samples
+    )
+    await vibration_vars['TotalSamples'].set_writable(False)
 
-    current_index_var = await vib_group.add_variable(idx, "CurrentSampleIndex", 0)
-    await current_index_var.set_writable(False)
+    vibration_vars['CurrentSampleIndex'] = await vib_group.add_variable(
+        idx, "CurrentSampleIndex", 0
+    )
+    await vibration_vars['CurrentSampleIndex'].set_writable(False)
 
-    timestamp_var = await vib_group.add_variable(idx, "Timestamp", time.time())
-    await timestamp_var.set_writable(False)
+    vibration_vars['Timestamp'] = await vib_group.add_variable(
+        idx, "Timestamp", time.time()
+    )
+    await vibration_vars['Timestamp'].set_writable(False)
 
-    # Add individual channel variables
-    channel_names = ["VibrationX", "VibrationY", "VibrationZ"]
-    for i, channel_name in enumerate(channel_names):
-        var = await vib_group.add_variable(idx, channel_name, float(vibration_data[0, i]))
-        await var.set_writable(False)
-        vibration_vars.append(var)
+    # Initial batch slice
+    init_batch = vibration_data[0:BATCH_SIZE, :]  # shape (10,3)
+    # 2D array
+    vibration_vars['VibrationBatch'] = await vib_group.add_variable(
+        idx,
+        "VibrationBatch",
+        [[float(x) for x in row] for row in init_batch]
+    )
+    await vibration_vars['VibrationBatch'].set_writable(False)
 
-    # Add a combined array variable for all 3 channels
-    combined_var = await vib_group.add_variable(idx, "VibrationXYZ", [float(x) for x in vibration_data[0, :]])
-    await combined_var.set_writable(False)
-    vibration_vars.append(combined_var)
-
-    # Add index and timestamp to the vars list for updating
-    vibration_vars.extend([current_index_var, timestamp_var])
+    # 1D arrays per axis
+    axes = ['X', 'Y', 'Z']
+    for i, ax in enumerate(axes):
+        vibration_vars[f'Vibration{ax}Batch'] = await vib_group.add_variable(
+            idx,
+            f"Vibration{ax}Batch",
+            [float(x) for x in init_batch[:, i]]
+        )
+        await vibration_vars[f'Vibration{ax}Batch'].set_writable(False)
 
     return vib_group
 
 
 async def update_vibration_data():
-    """Update vibration data variables with next sample"""
+    """Update vibration data variables with next batch"""
     global current_sample_index, vibration_data, vibration_vars
 
-    if vibration_data is None or len(vibration_vars) == 0:
+    if vibration_data is None or not vibration_vars:
         return
 
-    # Get current sample
-    current_sample = vibration_data[current_sample_index, :]
-    current_time = time.time()
+    total = vibration_data.shape[0]
+    start = current_sample_index
+    end = start + BATCH_SIZE
 
-    # Update individual channel variables (first 3 variables)
-    for i in range(3):
-        await vibration_vars[i].write_value(float(current_sample[i]))
+    # slice with wrap-around
+    if end <= total:
+        batch = vibration_data[start:end, :]
+    else:
+        wrap = end % total
+        batch = np.vstack((vibration_data[start:, :], vibration_data[:wrap, :]))
 
-    # Update combined array variable (4th variable)
-    await vibration_vars[3].write_value([float(x) for x in current_sample])
+    # prepare lists
+    batch_2d = [[float(x) for x in row] for row in batch]
+    x1d = [float(x) for x in batch[:, 0]]
+    y1d = [float(x) for x in batch[:, 1]]
+    z1d = [float(x) for x in batch[:, 2]]
 
-    # Update metadata variables (5th and 6th variables)
-    await vibration_vars[4].write_value(current_sample_index)  # Current index
-    await vibration_vars[5].write_value(current_time)  # Timestamp
+    # write to OPC UA
+    await vibration_vars['VibrationBatch'].write_value(batch_2d)
+    await vibration_vars['VibrationXBatch'].write_value(x1d)
+    await vibration_vars['VibrationYBatch'].write_value(y1d)
+    await vibration_vars['VibrationZBatch'].write_value(z1d)
 
-    # Print progress every 10 seconds
-    if current_sample_index % 10 == 0:
-        print(
-            f"Streaming sample {current_sample_index}/{vibration_data.shape[0]}: X={current_sample[0]:.2f}, Y={current_sample[1]:.2f}, Z={current_sample[2]:.2f}")
+    # metadata
+    await vibration_vars['CurrentSampleIndex'].write_value(current_sample_index)
+    await vibration_vars['Timestamp'].write_value(time.time())
 
-    # Move to next sample (loop back to start when finished)
-    current_sample_index = (current_sample_index + 1) % vibration_data.shape[0]
+    print(f"Streaming batch starting at sample {current_sample_index}")
 
+    current_sample_index = (current_sample_index + BATCH_SIZE) % total
     if current_sample_index == 0:
-        print("Completed one full cycle of vibration data, restarting from beginning...")
+        print("Completed one full cycle of vibration data, restarting...")
 
 
 async def streaming_task():
@@ -94,7 +112,7 @@ async def streaming_task():
     while True:
         try:
             await update_vibration_data()
-            await asyncio.sleep(1.0)  # Wait 1 second between updates
+            await asyncio.sleep(1.0)
         except Exception as e:
             print(f"Error updating vibration data: {e}")
             await asyncio.sleep(1.0)
@@ -112,20 +130,16 @@ async def main():
     objects = server.nodes.objects
     bosch_node = await objects.add_object(idx, "BoschVibrationData")
 
-    # Setup vibration streaming
+    # Setup streaming nodes
     await setup_vibration_streaming(bosch_node, idx)
 
     async with server:
-        print("Bosch Vibration Streaming Server is running...")
-        print(f"Endpoint: opc.tcp://0.0.0.0:4840/")
-        print(f"Total vibration samples: {vibration_data.shape[0]}")
-        print("Starting vibration data streaming (1 sample per second)...")
-
-        # Start the streaming task
-        streaming_task_handle = asyncio.create_task(streaming_task())
-
+        print("Server running at opc.tcp://0.0.0.0:4840/")
+        print(f"Total samples: {vibration_data.shape[0]}")
+        print(f"Publishing {BATCH_SIZE}-sample batches every second...")
+        task = asyncio.create_task(streaming_task())
         try:
-            await streaming_task_handle
+            await task
         except asyncio.CancelledError:
             print("Streaming task cancelled")
 
