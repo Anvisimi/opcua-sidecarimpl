@@ -2,21 +2,24 @@ FROM python:3.9-slim-buster
 
 WORKDIR /app
 
-# Install only basic requirements for file operations
+# Install git and basic requirements for file operations
 RUN apt-get update && apt-get install -y \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy sidecar script from the correct path
-COPY sidecar/DataSidecar.py .
+# Copy git-enhanced sidecar script (building from sidecar directory)
+COPY DataSidecar.py .
 
-# Create directories for volumes
-RUN mkdir -p /source-data /shared-data
+# Run as non-root user (create user first)
+RUN useradd -m -u 1000 sidecar
+
+# Create directories for volumes and ensure sidecar user owns them
+RUN mkdir -p /data /shared-data /home/sidecar/git-data-repo && \
+    chown -R sidecar:sidecar /data /shared-data /home/sidecar/git-data-repo /app
 
 # Set permissions
 RUN chmod +x DataSidecar.py
 
-# Run as non-root user
-RUN useradd -m -u 1000 sidecar
 USER sidecar
 
 CMD ["python", "DataSidecar.py"] 

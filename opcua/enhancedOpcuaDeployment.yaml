@@ -1,8 +1,8 @@
 # =============================================================================
-# ENHANCED OPC UA DEPLOYMENT - PERSISTENT DATA APPROACH
+# ENHANCED OPC UA DEPLOYMENT - WORKING SIDECAR APPROACH  
 # =============================================================================
-# This deployment uses persistent volumes so data survives pod restarts.
-# Sidecar copies data from source to shared volume when needed.
+# Uses proven sidecar pattern + enhanced server with file sorting improvements
+# Manual data copy but reliable volume mounting
 # =============================================================================
 
 apiVersion: v1
@@ -26,7 +26,7 @@ metadata:
   labels:
     app: enhanced-opcua-server
     component: multi-file-streaming
-    version: enhanced
+    version: enhanced-working
 spec:
   replicas: 1
   selector:
@@ -39,13 +39,13 @@ spec:
     spec:
       # Volume definitions
       volumes:
-      # PERSISTENT DATA VOLUME: Survives pod restarts
+      # SHARED DATA VOLUME: Survives pod restarts
       - name: shared-data-volume
         persistentVolumeClaim:
           claimName: opcua-data-pvc
 
       containers:
-      # Sidecar container - Simplified Data Manager
+      # Sidecar container - Enhanced Data Manager (for manual copy)
       - name: data-sidecar
         image: yathu25/data-sidecar:latest
         imagePullPolicy: Always
@@ -55,6 +55,8 @@ spec:
         env:
         - name: SHARED_DATA_PATH
           value: "/shared-data"
+        - name: DATA_GIT_REPO_URL
+          value: "https://github.com/Anvisimi/cncdata_M0102.git"
         resources:
           requests:
             memory: "256Mi"
@@ -63,7 +65,7 @@ spec:
             memory: "512Mi"
             cpu: "200m"
 
-      # Main container - Enhanced OPC UA Server
+      # Main container - Enhanced OPC UA Server with file sorting
       - name: enhanced-opcua-server
         image: yathu25/enhanced-opcua-server:latest
         imagePullPolicy: Always
@@ -101,47 +103,6 @@ spec:
         runAsNonRoot: true
         fsGroup: 1000
 
-      # Init container to set up directory structure
-      initContainers:
-      - name: init-data-setup
-        image: busybox:1.35
-        command:
-        - /bin/sh
-        - -c
-        - |
-          echo "Setting up shared data directory..."
-          mkdir -p /shared-data
-          chown 1000:1000 /shared-data
-          echo "Ready for sidecar data management"
-        volumeMounts:
-        - name: shared-data-volume
-          mountPath: /shared-data
-
----
-# ConfigMap for sidecar configuration
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: data-sidecar-config
-  namespace: p1-shopfloor
-data:
-  sync_interval: "300"
-  included_machines: "M01,M02"
-  excluded_operations: "OP00,OP06,OP09,OP13"
-  log_level: "INFO"
-  # Sample data for testing if no real data available
-  sample_data: |
-    {
-      "M01": {
-        "OP01": {"good": ["M01_Aug_2019_OP01_000.h5"], "bad": []},
-        "OP02": {"good": ["M01_Aug_2019_OP02_000.h5"], "bad": []}
-      },
-      "M02": {
-        "OP01": {"good": ["M02_Aug_2019_OP01_000.h5"], "bad": []},
-        "OP02": {"good": ["M02_Aug_2019_OP02_000.h5"], "bad": []}
-      }
-    }
-
 ---
 # =============================================================================
 # ENHANCED OPC UA SERVICE
@@ -155,7 +116,7 @@ metadata:
   labels:
     app: enhanced-opcua-server
     component: multi-file-streaming
-    version: enhanced
+    version: enhanced-working
 spec:
   selector:
     app: enhanced-opcua-server

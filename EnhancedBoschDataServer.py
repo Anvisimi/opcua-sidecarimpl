@@ -18,14 +18,41 @@ active_files = []
 
 BATCH_SIZE = 10  # number of samples per update
 SHARED_DATA_PATH = "/shared-data"
+SIDECAR_READY_FILE = "/shared-data/.ready"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def wait_for_sidecar_ready(timeout_seconds=300):
+    """Wait for sidecar to signal completion by creating .ready file"""
+    logger.info(f"Waiting for sidecar to complete data loading (timeout: {timeout_seconds}s)...")
+    
+    start_time = time.time()
+    while time.time() - start_time < timeout_seconds:
+        if os.path.exists(SIDECAR_READY_FILE):
+            logger.info("Sidecar has completed data loading!")
+            return True
+        
+        # Log progress every 30 seconds
+        elapsed = time.time() - start_time
+        if elapsed > 0 and int(elapsed) % 30 == 0:
+            logger.info(f"Still waiting for sidecar... ({elapsed:.0f}s elapsed)")
+        
+        time.sleep(5)  # Check every 5 seconds
+    
+    logger.error(f"Timeout waiting for sidecar to complete after {timeout_seconds}s")
+    return False
+
+
 def discover_files_from_shared_data() -> List[Dict]:
     """Discover HDF5 files directly from shared data directory with filtering"""
     file_list = []
+    
+    # Wait for sidecar to complete data loading
+    if not wait_for_sidecar_ready():
+        logger.error("Sidecar did not complete data loading within timeout")
+        return file_list
     
     # Target machines (M01, M02, exclude M03)
     target_machines = ['M01', 'M02']
@@ -107,15 +134,48 @@ def discover_files_from_shared_data() -> List[Dict]:
             logger.warning(f"Error processing file {h5_file_path}: {e}")
             continue
     
-    # Convert to sequential list: good files first, then bad files within each operation
+    # Sort files within each group for proper sequential ordering
+    def sort_key(file_info):
+        """Sort key function for proper file ordering"""
+        filename = file_info['filename']
+        try:
+            # Extract date and sequence number for sorting
+            # Format: M01_Aug_2019_OP01_000.h5 -> ['M01', 'Aug', '2019', 'OP01', '000']
+            parts = filename.replace('.h5', '').split('_')
+            if len(parts) >= 5:
+                # Sort by: machine, date_year, operation, sequence_number
+                machine = parts[0]
+                date_month = parts[1]  # Aug, Feb, etc.
+                date_year = parts[2]   # 2019, 2020, 2021
+                operation = parts[3]   # OP01, OP02, etc.
+                sequence = int(parts[4])  # 000, 001, 002, etc.
+                
+                # Create sortable tuple: (machine, year, month_priority, operation, sequence)
+                month_priority = {'Feb': 1, 'Aug': 2}.get(date_month, 3)  # Feb before Aug
+                
+                return (machine, int(date_year), month_priority, operation, sequence)
+            else:
+                # Fallback to filename sorting if format is unexpected
+                return (filename,)
+        except (ValueError, IndexError):
+            # Fallback to filename sorting if parsing fails
+            logger.warning(f"Could not parse filename for sorting: {filename}, using filename sort")
+            return (filename,)
+    
+    # Convert to sequential list with proper sorting
     for machine in sorted(machine_operations.keys()):
         for operation in sorted(machine_operations[machine].keys()):
-            # Add good files for this operation first
-            file_list.extend(machine_operations[machine][operation]['good'])
-            # Then add bad files for this operation
-            file_list.extend(machine_operations[machine][operation]['bad'])
+            # Sort good files for this operation
+            good_files = machine_operations[machine][operation]['good']
+            good_files.sort(key=sort_key)
+            file_list.extend(good_files)
+            
+            # Sort bad files for this operation  
+            bad_files = machine_operations[machine][operation]['bad']
+            bad_files.sort(key=sort_key)
+            file_list.extend(bad_files)
     
-    logger.info(f"Discovered {len(file_list)} files after filtering")
+    logger.info(f"Discovered {len(file_list)} files after filtering and sorting")
     if file_list:
         # Log summary
         machines = list(set(f['machine'] for f in file_list))
@@ -126,6 +186,12 @@ def discover_files_from_shared_data() -> List[Dict]:
         logger.info(f"Files by machine: {machines}")
         logger.info(f"Files by operation: {operations}")
         logger.info(f"Files by quality - Good: {good_count}, Bad: {bad_count}")
+        
+        # Log first few files to verify sorting
+        logger.info("First 10 files in sequence:")
+        for i, file_info in enumerate(file_list[:10]):
+            logger.info(f"  {i+1:2d}. {file_info['machine']}_{file_info['operation']} "
+                       f"({file_info['quality']}) - {file_info['filename']}")
     
     return file_list
 
@@ -252,19 +318,45 @@ async def update_vibration_data():
     start = current_sample_index
     end = start + BATCH_SIZE
 
-    # slice with wrap-around
-    if end <= total:
-        batch = vibration_data[start:end, :]
-    else:
-        wrap = end % total
-        batch = np.vstack((vibration_data[start:, :], vibration_data[:wrap, :]))
+    # Check if we need to move to next file
+    if start >= total:
+        # Current file is done, move to next file
+        logger.info(f"Completed file {current_file_index + 1}/{len(active_files)}, moving to next file...")
+        
+        current_file_index = (current_file_index + 1) % len(active_files)
+        
+        if current_file_index == 0:
+            logger.info("Completed all files, restarting from first file...")
+            
+        # Load next file
+        if load_current_file():
+            current_sample_index = 0
+            total = vibration_data.shape[0]
+            start = 0
+            end = BATCH_SIZE
+            
+            # Update file metadata
+            current_file = active_files[current_file_index]
+            await vibration_vars['CurrentFileIndex'].write_value(current_file_index)
+            await vibration_vars['CurrentFileName'].write_value(current_file['filename'])
+            await vibration_vars['CurrentMachine'].write_value(current_file['machine'])
+            await vibration_vars['CurrentOperation'].write_value(current_file['operation'])
+            await vibration_vars['CurrentQuality'].write_value(current_file['quality'])
+            await vibration_vars['TotalSamples'].write_value(vibration_data.shape[0])
+        else:
+            # Failed to load next file, return without processing
+            return
 
-    # prepare lists (maintain original format)
+    # Read the batch (simple slice, no wrap-around needed)
+    end = min(end, total)  # Don't go past end of file
+    batch = vibration_data[start:end, :]
+
+    # prepare lists
     x1d = [float(x) for x in batch[:, 0]]
     y1d = [float(x) for x in batch[:, 1]]
     z1d = [float(x) for x in batch[:, 2]]
 
-    # write to OPC UA (maintain original variable names)
+    # write to OPC UA
     await vibration_vars['VibrationXBatch'].write_value(x1d)
     await vibration_vars['VibrationYBatch'].write_value(y1d)
     await vibration_vars['VibrationZBatch'].write_value(z1d)
@@ -274,43 +366,23 @@ async def update_vibration_data():
     await vibration_vars['Timestamp'].write_value(time.time())
 
     current_file = active_files[current_file_index]
-    logger.info(f"Streaming batch {current_sample_index} from "
+    logger.info(f"Streaming records {start}-{end-1} from "
                f"{current_file['machine']}_{current_file['operation']} "
                f"({current_file['quality']}) - File {current_file_index + 1}/{len(active_files)}")
 
-    current_sample_index = (current_sample_index + BATCH_SIZE) % total
-    
-    # Check if we completed current file and need to move to next
-    if current_sample_index == 0:
-        logger.info(f"Completed file {current_file_index + 1}/{len(active_files)}, rotating to next file...")
-        
-        # Move to next file
-        current_file_index = (current_file_index + 1) % len(active_files)
-        
-        if current_file_index == 0:
-            logger.info("Completed all files, restarting from first file...")
-            
-        # Load next file
-        if load_current_file():
-            # Update file metadata
-            current_file = active_files[current_file_index]
-            await vibration_vars['CurrentFileIndex'].write_value(current_file_index)
-            await vibration_vars['CurrentFileName'].write_value(current_file['filename'])
-            await vibration_vars['CurrentMachine'].write_value(current_file['machine'])
-            await vibration_vars['CurrentOperation'].write_value(current_file['operation'])
-            await vibration_vars['CurrentQuality'].write_value(current_file['quality'])
-            await vibration_vars['TotalSamples'].write_value(vibration_data.shape[0])
+    # Move to next position
+    current_sample_index += BATCH_SIZE
 
 
 async def streaming_task():
-    """Background task to update vibration data every second"""
+    """Background task to update vibration data every 0.25 seconds (fast test mode)"""
     while True:
         try:
             await update_vibration_data()
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.25)
         except Exception as e:
             logger.error(f"Error updating vibration data: {e}")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.25)
 
 
 async def main():
@@ -334,7 +406,7 @@ async def main():
     async with server:
         logger.info("Enhanced server running at opc.tcp://0.0.0.0:4840/")
         logger.info(f"Total files to stream: {len(active_files)}")
-        logger.info(f"Publishing {BATCH_SIZE}-sample batches every second...")
+        logger.info(f"Publishing {BATCH_SIZE}-sample batches every 0.25 seconds (fast test mode)...")
         
         # Log summary
         machines = list(set(f['machine'] for f in active_files))
