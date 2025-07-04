@@ -1,0 +1,167 @@
+# =============================================================================
+# ENHANCED OPC UA DEPLOYMENT - PERSISTENT DATA APPROACH
+# =============================================================================
+# This deployment uses persistent volumes so data survives pod restarts.
+# Sidecar copies data from source to shared volume when needed.
+# =============================================================================
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: opcua-data-pvc
+  namespace: p1-shopfloor
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enhanced-opcua-server
+  namespace: p1-shopfloor
+  labels:
+    app: enhanced-opcua-server
+    component: multi-file-streaming
+    version: enhanced
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: enhanced-opcua-server
+  template:
+    metadata:
+      labels:
+        app: enhanced-opcua-server
+    spec:
+      # Volume definitions
+      volumes:
+      # PERSISTENT DATA VOLUME: Survives pod restarts
+      - name: shared-data-volume
+        persistentVolumeClaim:
+          claimName: opcua-data-pvc
+
+      containers:
+      # Sidecar container - Simplified Data Manager
+      - name: data-sidecar
+        image: yathu25/data-sidecar:latest
+        imagePullPolicy: Always
+        volumeMounts:
+        - name: shared-data-volume
+          mountPath: /shared-data
+        env:
+        - name: SHARED_DATA_PATH
+          value: "/shared-data"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "200m"
+
+      # Main container - Enhanced OPC UA Server
+      - name: enhanced-opcua-server
+        image: yathu25/enhanced-opcua-server:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 4840
+        volumeMounts:
+        - name: shared-data-volume
+          mountPath: /shared-data
+          readOnly: true
+        env:
+        - name: OPCUA_PORT
+          value: "4840"
+        - name: SHARED_DATA_PATH
+          value: "/shared-data"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          tcpSocket:
+            port: 4840
+          initialDelaySeconds: 60
+          periodSeconds: 20
+        readinessProbe:
+          tcpSocket:
+            port: 4840
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+      securityContext:
+        runAsUser: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+
+      # Init container to set up directory structure
+      initContainers:
+      - name: init-data-setup
+        image: busybox:1.35
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Setting up shared data directory..."
+          mkdir -p /shared-data
+          chown 1000:1000 /shared-data
+          echo "Ready for sidecar data management"
+        volumeMounts:
+        - name: shared-data-volume
+          mountPath: /shared-data
+
+---
+# ConfigMap for sidecar configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: data-sidecar-config
+  namespace: p1-shopfloor
+data:
+  sync_interval: "300"
+  included_machines: "M01,M02"
+  excluded_operations: "OP00,OP06,OP09,OP13"
+  log_level: "INFO"
+  # Sample data for testing if no real data available
+  sample_data: |
+    {
+      "M01": {
+        "OP01": {"good": ["M01_Aug_2019_OP01_000.h5"], "bad": []},
+        "OP02": {"good": ["M01_Aug_2019_OP02_000.h5"], "bad": []}
+      },
+      "M02": {
+        "OP01": {"good": ["M02_Aug_2019_OP01_000.h5"], "bad": []},
+        "OP02": {"good": ["M02_Aug_2019_OP02_000.h5"], "bad": []}
+      }
+    }
+
+---
+# =============================================================================
+# ENHANCED OPC UA SERVICE
+# =============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: enhanced-opcua-service
+  namespace: p1-shopfloor
+  labels:
+    app: enhanced-opcua-server
+    component: multi-file-streaming
+    version: enhanced
+spec:
+  selector:
+    app: enhanced-opcua-server
+  ports:
+  - protocol: TCP
+    port: 4840
+    targetPort: 4840
+    name: opcua-enhanced
+  type: ClusterIP 

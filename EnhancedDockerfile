@@ -1,0 +1,43 @@
+FROM python:3.9-slim-buster
+
+WORKDIR /app
+
+# Install dependencies including HDF5 and build tools for h5py
+RUN apt-get update && apt-get install -y \
+    gcc \
+    pkg-config \
+    libhdf5-dev \
+    libhdf5-serial-dev \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first to leverage Docker cache
+COPY requirements.txt .
+
+# Install Python packages with optimized approach
+# Try to use pre-compiled wheels first, fall back to building from source
+ENV HDF5_DIR=/usr
+ENV HDF5_LIBDIR=/usr/lib
+ENV HDF5_INCLUDEDIR=/usr/include
+
+# Upgrade pip and install wheel for better package handling
+RUN pip install --upgrade pip wheel
+
+# Install dependencies in optimal order
+RUN pip install --no-cache-dir numpy && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy enhanced application files
+COPY EnhancedBoschDataServer.py .
+
+# Create directories for shared volumes
+RUN mkdir -p /shared-data
+
+# Set permissions for non-root user
+RUN useradd -m -u 1000 opcua
+RUN chown -R opcua:opcua /app /shared-data
+USER opcua
+
+EXPOSE 4840
+
+CMD ["python", "EnhancedBoschDataServer.py"] 

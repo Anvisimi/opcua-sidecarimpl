@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opcua-server
+  namespace: p1-shopfloor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opcua-server
+  template:
+    metadata:
+      labels:
+        app: opcua-server
+    spec:
+      containers:
+      - name: opcua-server
+        image: yathu25/opcua-server:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 4840
+        env:
+        - name: OPCUA_PORT
+          value: "4840"
+        livenessProbe:
+          tcpSocket:
+            port: 4840
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          tcpSocket:
+            port: 4840
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      securityContext:
+        runAsUser: 1000
+        runAsNonRoot: true
