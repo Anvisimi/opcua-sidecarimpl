@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 import h5py
 import numpy as np
 from asyncua import Server
+from asyncua import ua
 
 # Enhanced global state
 current_file_index = 0
@@ -162,18 +163,43 @@ def discover_files_from_shared_data() -> List[Dict]:
             logger.warning(f"Could not parse filename for sorting: {filename}, using filename sort")
             return (filename,)
     
-    # Convert to sequential list with proper sorting
-    for machine in sorted(machine_operations.keys()):
-        for operation in sorted(machine_operations[machine].keys()):
-            # Sort good files for this operation
-            good_files = machine_operations[machine][operation]['good']
-            good_files.sort(key=sort_key)
-            file_list.extend(good_files)
-            
-            # Sort bad files for this operation  
-            bad_files = machine_operations[machine][operation]['bad']
-            bad_files.sort(key=sort_key)
-            file_list.extend(bad_files)
+    # OPTIMIZED: Alternating good/bad pattern by month/year for realistic StatusCode demonstration
+    # Group files by month/year for chronological processing
+    month_year_files = {}
+    
+    for machine in machine_operations:
+        for operation in machine_operations[machine]:
+            for quality in ['good', 'bad']:
+                for file_info in machine_operations[machine][operation][quality]:
+                    # Extract month/year from filename (M01_Feb_2019_OP01_000.h5)
+                    filename = file_info['filename']
+                    parts = filename.replace('.h5', '').split('_')
+                    if len(parts) >= 4:
+                        month_year = f"{parts[1]}_{parts[2]}"  # Feb_2019, Aug_2019, etc.
+                        
+                        if month_year not in month_year_files:
+                            month_year_files[month_year] = {'good': [], 'bad': []}
+                        
+                        month_year_files[month_year][quality].append(file_info)
+    
+    # Sort month/year combinations chronologically  
+    def month_year_key(my):
+        month, year = my.split('_')
+        month_order = {'Feb': 1, 'Aug': 2}
+        return (int(year), month_order.get(month, 3))
+    
+    # For each month/year: alternate good → bad → good → bad for rapid StatusCode changes
+    for month_year in sorted(month_year_files.keys(), key=month_year_key):
+        good_files = sorted(month_year_files[month_year]['good'], key=sort_key)
+        bad_files = sorted(month_year_files[month_year]['bad'], key=sort_key)
+        
+        # Optimized alternating merge
+        max_files = max(len(good_files), len(bad_files))
+        for i in range(max_files):
+            if i < len(good_files):
+                file_list.append(good_files[i])
+            if i < len(bad_files):
+                file_list.append(bad_files[i])
     
     logger.info(f"Discovered {len(file_list)} files after filtering and sorting")
     if file_list:
@@ -187,11 +213,16 @@ def discover_files_from_shared_data() -> List[Dict]:
         logger.info(f"Files by operation: {operations}")
         logger.info(f"Files by quality - Good: {good_count}, Bad: {bad_count}")
         
-        # Log first few files to verify sorting
-        logger.info("First 10 files in sequence:")
-        for i, file_info in enumerate(file_list[:10]):
-            logger.info(f"  {i+1:2d}. {file_info['machine']}_{file_info['operation']} "
-                       f"({file_info['quality']}) - {file_info['filename']}")
+        # Log first few files to verify optimized alternating pattern
+        logger.info("First 15 files in OPTIMIZED alternating sequence:")
+        for i, file_info in enumerate(file_list[:15]):
+            # Extract month/year for display
+            filename = file_info['filename']
+            parts = filename.replace('.h5', '').split('_')
+            month_year = f"{parts[1]} {parts[2]}" if len(parts) >= 4 else "Unknown"
+            quality_symbol = "✅" if file_info['quality'] == 'good' else "❌"
+            logger.info(f"  {i+1:2d}. {month_year} - {file_info['machine']}_{file_info['operation']} "
+                       f"({file_info['quality']}) {quality_symbol} - StatusCode: {'Good' if file_info['quality'] == 'good' else 'Bad'}")
     
     return file_list
 
@@ -356,7 +387,19 @@ async def update_vibration_data():
     y1d = [float(x) for x in batch[:, 1]]
     z1d = [float(x) for x in batch[:, 2]]
 
-    # write to OPC UA
+    # Determine StatusCode based on directory name
+    current_file = active_files[current_file_index]
+    file_path = current_file['path']
+    
+    # Check if file is in 'good' or 'bad' directory
+    if '/good/' in file_path:
+        status_code = ua.StatusCode(0)  # Good
+    elif '/bad/' in file_path:
+        status_code = ua.StatusCode(0x80000000)  # Bad
+    else:
+        status_code = ua.StatusCode(0)  # Default to Good
+    
+    # Write to OPC UA with StatusCode - temporarily using simple write_value while we debug StatusCode
     await vibration_vars['VibrationXBatch'].write_value(x1d)
     await vibration_vars['VibrationYBatch'].write_value(y1d)
     await vibration_vars['VibrationZBatch'].write_value(z1d)
@@ -365,24 +408,24 @@ async def update_vibration_data():
     await vibration_vars['CurrentSampleIndex'].write_value(current_sample_index)
     await vibration_vars['Timestamp'].write_value(time.time())
 
-    current_file = active_files[current_file_index]
+    status_text = "Good" if '/good/' in file_path else "Bad" if '/bad/' in file_path else "Good"
     logger.info(f"Streaming records {start}-{end-1} from "
                f"{current_file['machine']}_{current_file['operation']} "
-               f"({current_file['quality']}) - File {current_file_index + 1}/{len(active_files)}")
+               f"({current_file['quality']}) - StatusCode: {status_text} - File {current_file_index + 1}/{len(active_files)}")
 
     # Move to next position
     current_sample_index += BATCH_SIZE
 
 
 async def streaming_task():
-    """Background task to update vibration data every 0.25 seconds (fast test mode)"""
+    """Background task to update vibration data every 0.50 seconds (fast test mode)"""
     while True:
         try:
             await update_vibration_data()
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.50)
         except Exception as e:
             logger.error(f"Error updating vibration data: {e}")
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.50)
 
 
 async def main():
@@ -406,7 +449,7 @@ async def main():
     async with server:
         logger.info("Enhanced server running at opc.tcp://0.0.0.0:4840/")
         logger.info(f"Total files to stream: {len(active_files)}")
-        logger.info(f"Publishing {BATCH_SIZE}-sample batches every 0.25 seconds (fast test mode)...")
+        logger.info(f"Publishing {BATCH_SIZE}-sample batches every 0.50 seconds (fast test mode)...")
         
         # Log summary
         machines = list(set(f['machine'] for f in active_files))
